@@ -49,12 +49,14 @@ async function request(path, options = {}) {
 
 export const merchantApi = {
   login: payload => request('/merchant/login', { method: 'POST', body: JSON.stringify(payload), skipAuth: true }),
+  getSliderCaptcha: () => request(`/auth/slider-captcha?_t=${Date.now()}`, { skipAuth: true }),
+  verifySliderCaptcha: payload => request('/auth/slider-captcha/verify', { method: 'POST', body: JSON.stringify(payload), skipAuth: true }),
   apply: payload => request('/merchant/apply', { method: 'POST', body: JSON.stringify(payload), skipAuth: true }),
   me: () => request('/merchant/me'),
   logout: () => request('/merchant/logout', { method: 'POST' }),
   getStudyProducts: () => request('/merchant/study/products'),
   createStudyProduct: product => request('/merchant/study/products', { method: 'POST', body: JSON.stringify(product) }),
-  updateStudyProduct: product => request(`/merchant/study/products/${product.id}`, { method: 'PUT', body: JSON.stringify(product) }),
+  updateStudyProduct: (id, product) => request(`/merchant/study/products/${id}`, { method: 'PUT', body: JSON.stringify(product) }),
   setStudyProductStatus: (id, enabled) => request(`/merchant/study/products/${id}/status?enabled=${enabled}`, { method: 'PATCH' }),
   getTravelRoutes: () => request('/merchant/travel/routes'),
   getTravelRouteReviews: () => request('/merchant/travel/route-reviews'),

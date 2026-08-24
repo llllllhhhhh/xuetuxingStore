@@ -11,7 +11,15 @@
       <button v-if="school" class="ghost" @click="logout">退出登录</button>
     </section>
 
-    <section v-if="school" class="dashboard merchant-workbench">
+    <ProductEditorPage
+      v-if="school && tab === 'productEdit'"
+      v-model:product="productForm"
+      :saving="saving"
+      @back="closeProductEditor"
+      @save="saveProduct"
+    />
+
+    <section v-else-if="school" class="dashboard merchant-workbench">
       <aside class="merchant-sidebar">
       <div class="school-card">
         <div class="school-logo">
@@ -117,7 +125,7 @@
           <article v-for="item in filteredProducts" :key="item.id" class="product-table-row">
             <div class="product-main">
               <div class="product-thumb">
-                <img v-if="item.cover" :src="item.cover" alt="">
+                <img v-if="item.cover && !item.cover_load_failed" :src="item.cover" alt="" @error="item.cover_load_failed = true">
                 <i v-else>{{ (item.name || '产').slice(0, 1) }}</i>
               </div>
               <div class="product-copy">
@@ -139,42 +147,6 @@
           </article>
           <p v-if="products.length && !filteredProducts.length" class="empty">没有符合筛选条件的产品。</p>
           <p v-if="!products.length" class="empty">还没有产品，先提交一个学习服务给平台审核吧。</p>
-        </div>
-      </section>
-
-      <section v-else-if="tab === 'productEdit'" ref="workspacePanelRef" class="panel workspace-panel editor-panel form-page">
-        <div class="panel-head">
-          <div>
-            <h2>{{ productForm.id ? '编辑学习产品' : '新增学习产品' }}</h2>
-            <p>商户提交后进入平台审核，审核通过并上架后，用户端才会展示。</p>
-          </div>
-          <div class="page-actions"><button class="ghost dark" @click="switchTab('products')">返回列表</button><button class="primary" @click="saveProduct" :disabled="saving">{{ saving ? '提交中...' : (productForm.id ? '保存并送审' : '提交审核') }}</button></div>
-        </div>
-
-        <div class="product-form">
-          <label>产品名称<input v-model.trim="productForm.name" placeholder="如：考研全程规划班"></label>
-          <label>类型
-            <select v-model="productForm.product_type">
-              <option value="community">付费社群</option>
-              <option value="package">长期套餐</option>
-              <option value="material">资料包</option>
-            </select>
-          </label>
-          <label>售卖价格<input v-model.number="productForm.price" type="number" min="0" step="0.01"></label>
-          <label>划线价格<input v-model.number="productForm.original_price" type="number" min="0" step="0.01"></label>
-          <label class="wide">一句话卖点<input v-model.trim="productForm.subtitle" placeholder="督学陪伴 · 资料课程 · 长期规划"></label>
-          <label class="wide">产品说明<textarea v-model.trim="productForm.description" rows="3"></textarea></label>
-          <label>计费周期
-            <select v-model="productForm.billing_cycle">
-              <option value="once">一次性</option>
-              <option value="month">按月</option>
-              <option value="year">按年</option>
-            </select>
-          </label>
-          <label>库存（-1 不限）<input v-model.number="productForm.stock" type="number" min="-1"></label>
-          <label>试看分钟<input v-model.number="productForm.trial_minutes" type="number" min="0"></label>
-          <label>封面 URL<input v-model.trim="productForm.cover" placeholder="https://..."></label>
-          <label class="wide">权益内容（每行一条）<textarea v-model="benefitText" rows="4" placeholder="每日督学打卡&#10;学长在线答疑"></textarea></label>
         </div>
       </section>
 
@@ -376,6 +348,19 @@
       </form>
     </section>
 
+    <div v-if="showSlider" class="slider-modal-mask" @click.self="closeSlider">
+      <div class="slider-modal">
+        <div class="slider-modal-head">
+          <div>
+            <h2>登录安全验证</h2>
+            <p>完成滑块后将自动登录商户端。</p>
+          </div>
+          <button type="button" @click="closeSlider">×</button>
+        </div>
+        <SliderCaptcha ref="sliderRef" @verified="handleSliderVerified" @reset="sliderTicket = ''" @toast="toast" />
+      </div>
+    </div>
+
     <div v-if="message" class="toast">{{ message }}</div>
     <div v-if="previewImageUrl" class="image-lightbox" @click="previewImageUrl = ''">
       <button @click.stop="previewImageUrl = ''">×</button>
@@ -436,6 +421,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { clearToken, getMerchantWebSocketBaseUrl, getToken, merchantApi, resolveMerchantAssetThumbUrl, resolveMerchantAssetUrl, setToken } from './api'
 import { cacheSupportImage, getCachedSupportImage } from './imageCache'
+import ProductEditorPage from './components/ProductEditorPage.vue'
+import SliderCaptcha from './components/SliderCaptcha.vue'
 import { REVIEW_STATUS, paymentStatusName, reviewStatusName } from './utils/orderStatus'
 
 const mode = ref('login')
@@ -467,8 +454,15 @@ const studyOrderDetail = ref(null)
 const chatBodyRef = ref(null)
 const workspacePanelRef = ref(null)
 let supportSocket = null
+let supportReconnectTimer = null
+let supportSocketGeneration = 0
+let supportMessagesRequestId = 0
+let toastTimer = null
 
 const loginForm = ref({ account: '', password: '' })
+const sliderTicket = ref('')
+const sliderRef = ref(null)
+const showSlider = ref(false)
 const applyForm = ref({
   name: '',
   short_name: '',
@@ -490,7 +484,7 @@ const emptyProduct = () => ({
   original_price: 19.9,
   billing_cycle: 'month',
   cover: '',
-  benefits: [],
+  benefits: ['每日督学打卡', '学长在线答疑', '每周线上模考', '精选资料共享'],
   trial_minutes: 5,
   stock: -1,
   featured: false,
@@ -500,7 +494,6 @@ const emptyProduct = () => ({
   contents: [{ title: '5分钟免费试看', content_type: 'lesson', summary: '了解服务内容', resource_url: '', duration_minutes: 5, preview: true, sort_order: 1, status: true }],
 })
 const productForm = ref(emptyProduct())
-const benefitText = ref('每日督学打卡\n学长在线答疑')
 const emptyTravelRoute = () => ({
   id: null,
   name: '',
@@ -522,7 +515,11 @@ const reviewName = value => reviewStatusName(value)
 const payName = value => paymentStatusName(value)
 const paymentMethodName = value => ({ wechat: '微信支付', balance: '余额支付', points: '积分支付', mock: '模拟支付' }[value] || value || '-')
 const supportRoleName = value => ({ user: '用户', merchant: '商户客服', admin: '平台客服' }[value] || value)
-const formatTime = value => value ? new Date(value).toLocaleString() : '-'
+const formatTime = value => {
+  if (!value) return '-'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString()
+}
 const openStudyOrderDetail = order => { studyOrderDetail.value = order }
 const routeReviewSummary = routeId => {
   const items = travelRouteReviews.value.filter(item => Number(item.route_id) === Number(routeId))
@@ -600,11 +597,11 @@ const hydrateMerchantImage = message => {
   const fullUrl = resolveMerchantAssetUrl(message.image_url)
   message.resolved_image_url = remoteUrl || fullUrl
   getCachedSupportImage(message.resolved_image_url).then(src => {
-    if (src) message.cached_image_src = src
+    setCachedSupportImage(message, src)
   })
   setTimeout(() => {
     cacheSupportImage(message.resolved_image_url, src => {
-      if (src) message.cached_image_src = src
+      setCachedSupportImage(message, src)
     })
   }, 200)
   return message
@@ -612,7 +609,33 @@ const hydrateMerchantImage = message => {
 const hydrateMerchantImages = list => list.map(item => hydrateMerchantImage(item))
 const toast = text => {
   message.value = text
-  setTimeout(() => { message.value = '' }, 2200)
+  if (toastTimer) clearTimeout(toastTimer)
+  toastTimer = setTimeout(() => {
+    message.value = ''
+    toastTimer = null
+  }, 2200)
+}
+
+const revokeObjectUrl = url => {
+  if (typeof url === 'string' && url.startsWith('blob:')) URL.revokeObjectURL(url)
+}
+
+const releaseSupportMessageUrls = list => {
+  list.forEach(item => {
+    if (item.pending_timer) clearTimeout(item.pending_timer)
+    revokeObjectUrl(item.local_preview)
+    revokeObjectUrl(item.cached_image_src)
+  })
+}
+
+const setCachedSupportImage = (messageItem, src) => {
+  if (!src) return
+  if (!supportMessages.value.includes(messageItem)) {
+    revokeObjectUrl(src)
+    return
+  }
+  revokeObjectUrl(messageItem.cached_image_src)
+  messageItem.cached_image_src = src
 }
 
 const scrollSupportToBottom = async () => {
@@ -638,9 +661,13 @@ const switchTab = async nextTab => {
 
 const openProductEditor = () => {
   productForm.value = emptyProduct()
-  benefitText.value = '每日督学打卡\n学长在线答疑'
   tab.value = 'productEdit'
-  scrollToWorkspacePanel()
+  scrollToWorkbenchTop()
+}
+
+const closeProductEditor = async () => {
+  tab.value = 'products'
+  await scrollToWorkspacePanel()
 }
 
 const openTravelRouteEditor = () => {
@@ -650,20 +677,32 @@ const openTravelRouteEditor = () => {
 }
 
 const closeSupportSocket = () => {
+  supportSocketGeneration += 1
+  if (supportReconnectTimer) clearTimeout(supportReconnectTimer)
+  supportReconnectTimer = null
   if (supportSocket) supportSocket.close()
   supportSocket = null
   supportConnected.value = false
 }
 
-const connectSupportSocket = conversation => {
+const connectSupportSocket = (conversation, attempt = 0) => {
   closeSupportSocket()
   if (!conversation?.id || !getToken()) return
+  const generation = supportSocketGeneration
   const url = `${getMerchantWebSocketBaseUrl()}/support/ws/${conversation.id}?role=merchant&token=${encodeURIComponent(getToken())}`
-  supportSocket = new WebSocket(url)
-  supportSocket.onopen = () => { supportConnected.value = true }
-  supportSocket.onclose = () => { supportConnected.value = false }
-  supportSocket.onerror = () => { supportConnected.value = false }
-  supportSocket.onmessage = event => {
+  const socket = new WebSocket(url)
+  supportSocket = socket
+  socket.onopen = () => { supportConnected.value = true }
+  socket.onclose = () => {
+    supportConnected.value = false
+    if (supportSocket !== socket || generation !== supportSocketGeneration || selectedConversation.value?.id !== conversation.id) return
+    const delay = Math.min(1000 * (2 ** attempt), 15000)
+    supportReconnectTimer = setTimeout(() => {
+      if (selectedConversation.value?.id === conversation.id) connectSupportSocket(conversation, attempt + 1)
+    }, delay)
+  }
+  socket.onerror = () => { supportConnected.value = false }
+  socket.onmessage = event => {
     let data = null
     try { data = JSON.parse(event.data) } catch { return }
     if (data.type === 'message' && data.message && !supportMessages.value.some(item => item.id === data.message.id)) {
@@ -671,9 +710,11 @@ const connectSupportSocket = conversation => {
       if (incoming.message_type === 'image' && incoming.sender_role === 'merchant') {
         const pending = supportMessages.value.find(item => item.local_pending && item.sender_role === 'merchant')
         if (pending) {
+          if (pending.pending_timer) clearTimeout(pending.pending_timer)
+          revokeObjectUrl(pending.local_preview)
           Object.assign(pending, incoming, {
             local_pending: false,
-            local_preview: pending.local_preview,
+            local_preview: '',
             uploading: false,
           })
           scrollSupportToBottom()
@@ -697,13 +738,19 @@ const loadSupportConversations = async () => {
 }
 
 const selectConversation = async item => {
+  const requestId = ++supportMessagesRequestId
+  closeSupportSocket()
   selectedConversation.value = item
   try {
-    supportMessages.value = hydrateMerchantImages(await merchantApi.getSupportMessages(item.id))
+    const rows = await merchantApi.getSupportMessages(item.id)
+    if (requestId !== supportMessagesRequestId || selectedConversation.value?.id !== item.id) return
+    releaseSupportMessageUrls(supportMessages.value)
+    supportMessages.value = hydrateMerchantImages(rows)
     connectSupportSocket(item)
     scrollSupportToBottom()
     await loadSupportConversations()
   } catch (error) {
+    if (requestId !== supportMessagesRequestId) return
     toast(error.message || '消息加载失败')
   }
 }
@@ -732,9 +779,9 @@ const uploadSupportImage = async event => {
     event.target.value = ''
     return
   }
-  try {
-    const previewUrl = URL.createObjectURL(file)
-    const pendingMessage = {
+  const conversationId = selectedConversation.value.id
+  const previewUrl = URL.createObjectURL(file)
+  const pendingMessage = {
       id: `local-merchant-${Date.now()}`,
       sender_role: 'merchant',
       sender_name: '商户客服',
@@ -745,10 +792,20 @@ const uploadSupportImage = async event => {
       uploading: true,
       content: '',
       created_at: new Date().toISOString(),
-    }
+  }
+  let uploadTimer = null
+  try {
     supportMessages.value.push(pendingMessage)
     scrollSupportToBottom()
-    const result = await merchantApi.uploadSupportImage(selectedConversation.value.id, file)
+    const result = await Promise.race([
+      merchantApi.uploadSupportImage(conversationId, file),
+      new Promise((_, reject) => {
+        uploadTimer = setTimeout(() => reject(new Error('图片上传超时，请重试')), 30000)
+      }),
+    ])
+    if (selectedConversation.value?.id !== conversationId || !supportSocket || supportSocket.readyState !== WebSocket.OPEN) {
+      throw new Error('客服连接已断开，请重试')
+    }
     Object.assign(pendingMessage, {
       image_url: result.url,
       image_thumb_url: result.thumb_url || result.url,
@@ -761,9 +818,21 @@ const uploadSupportImage = async event => {
       image_thumb_url: result.thumb_url || result.url,
       content: '',
     }))
+    pendingMessage.pending_timer = setTimeout(() => {
+      if (!pendingMessage.local_pending) return
+      const index = supportMessages.value.indexOf(pendingMessage)
+      if (index >= 0) supportMessages.value.splice(index, 1)
+      revokeObjectUrl(pendingMessage.local_preview)
+      toast('图片发送超时，请重试')
+    }, 30000)
   } catch (error) {
+    if (pendingMessage.pending_timer) clearTimeout(pendingMessage.pending_timer)
+    const index = supportMessages.value.indexOf(pendingMessage)
+    if (index >= 0) supportMessages.value.splice(index, 1)
+    revokeObjectUrl(previewUrl)
     toast(error.message || '图片上传失败')
   } finally {
+    if (uploadTimer) clearTimeout(uploadTimer)
     event.target.value = ''
   }
 }
@@ -803,19 +872,40 @@ const loadMe = async () => {
 }
 
 const login = async () => {
+  if (!sliderTicket.value) {
+    showSlider.value = true
+    return
+  }
   loading.value = true
   try {
-    const result = await merchantApi.login(loginForm.value)
+    if (!sliderTicket.value) {
+      toast('请先完成滑块验证')
+      return
+    }
+    const result = await merchantApi.login({ ...loginForm.value, slider_ticket: sliderTicket.value })
     setToken(result.token)
     school.value = result.school
     logoBroken.value = false
     await loadMerchantData()
     toast('登录成功')
   } catch (error) {
+    sliderTicket.value = ''
+    showSlider.value = false
     toast(error.message || '登录失败')
   } finally {
     loading.value = false
   }
+}
+
+const closeSlider = () => {
+  showSlider.value = false
+  sliderTicket.value = ''
+}
+
+const handleSliderVerified = ticket => {
+  sliderTicket.value = ticket
+  showSlider.value = false
+  login()
 }
 
 const apply = async () => {
@@ -838,16 +928,43 @@ const saveProduct = async () => {
   }
   saving.value = true
   try {
+    const productId = productForm.value.id
     const payload = {
-      ...productForm.value,
-      benefits: benefitText.value.split('\n').map(item => item.trim()).filter(Boolean),
+      name: String(productForm.value.name || '').trim(),
+      product_type: productForm.value.product_type || 'community',
+      subtitle: String(productForm.value.subtitle || '').trim(),
+      description: String(productForm.value.description || '').trim(),
+      price: Number(productForm.value.price || 0),
+      original_price: Number(productForm.value.original_price || 0),
+      billing_cycle: productForm.value.billing_cycle || 'once',
+      cover: String(productForm.value.cover || '').trim(),
+      stock: Number(productForm.value.stock ?? -1),
+      trial_minutes: Number(productForm.value.trial_minutes || 0),
+      featured: Boolean(productForm.value.featured),
+      installment_enabled: Boolean(productForm.value.installment_enabled),
+      installment_count: productForm.value.installment_enabled
+        ? Number(productForm.value.installment_count || 1)
+        : 1,
+      benefits: (productForm.value.benefits || []).map(item => String(item || '').trim()).filter(Boolean),
+      contents: (productForm.value.contents || [])
+        .map((item, index) => ({
+          title: String(item.title || '').trim(),
+          content_type: item.content_type || 'lesson',
+          summary: String(item.summary || '').trim(),
+          resource_url: String(item.resource_url || '').trim(),
+          duration_minutes: Number(item.duration_minutes || 0),
+          preview: Boolean(item.preview),
+          sort_order: index + 1,
+          status: item.status !== false,
+        }))
+        .filter(item => item.title),
     }
-    if (payload.id) await merchantApi.updateStudyProduct(payload)
+    if (productId) await merchantApi.updateStudyProduct(productId, payload)
     else await merchantApi.createStudyProduct(payload)
     productForm.value = emptyProduct()
-    benefitText.value = '每日督学打卡\n学长在线答疑'
     await loadMerchantData()
     tab.value = 'products'
+    await scrollToWorkspacePanel()
     toast('已提交平台审核')
   } catch (error) {
     toast(error.message || '提交失败')
@@ -857,10 +974,15 @@ const saveProduct = async () => {
 }
 
 const editProduct = item => {
-  productForm.value = JSON.parse(JSON.stringify(item))
-  benefitText.value = (item.benefits || []).join('\n')
+  const draft = JSON.parse(JSON.stringify(item))
+  productForm.value = {
+    ...emptyProduct(),
+    ...draft,
+    benefits: Array.isArray(draft.benefits) ? draft.benefits : [],
+    contents: Array.isArray(draft.contents) ? draft.contents : [],
+  }
   tab.value = 'productEdit'
-  scrollToWorkspacePanel()
+  scrollToWorkbenchTop()
 }
 
 const canToggleProduct = item => item.review_status === REVIEW_STATUS.APPROVED
@@ -940,11 +1062,16 @@ const logout = async () => {
   orders.value = []
   supportConversations.value = []
   selectedConversation.value = null
+  releaseSupportMessageUrls(supportMessages.value)
   supportMessages.value = []
 }
 
 onMounted(loadMe)
-onBeforeUnmount(closeSupportSocket)
+onBeforeUnmount(() => {
+  closeSupportSocket()
+  releaseSupportMessageUrls(supportMessages.value)
+  if (toastTimer) clearTimeout(toastTimer)
+})
 </script>
 
 <style scoped>
@@ -2049,6 +2176,52 @@ onBeforeUnmount(closeSupportSocket)
 .study-order-modal .order-detail-grid div:nth-child(10),
 .study-order-modal .order-detail-grid div:nth-child(11){
   grid-column:span 3;
+}
+.slider-modal-mask{
+  position:fixed;
+  inset:0;
+  z-index:90;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:24px;
+  background:rgba(15,23,42,.42);
+  backdrop-filter:blur(8px);
+}
+.slider-modal{
+  width:min(420px,100%);
+  padding:18px;
+  border-radius:18px;
+  background:#fff;
+  box-shadow:0 28px 80px rgba(15,23,42,.28);
+}
+.slider-modal-head{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:16px;
+  margin-bottom:14px;
+}
+.slider-modal-head h2{
+  margin:0;
+  color:#172033;
+  font-size:19px;
+}
+.slider-modal-head p{
+  margin:4px 0 0;
+  color:#788397;
+  font-size:13px;
+}
+.slider-modal-head button{
+  width:34px;
+  height:34px;
+  border:0;
+  border-radius:50%;
+  background:#f1f5f9;
+  color:#475569;
+  font-size:22px;
+  font-weight:800;
+  line-height:1;
 }
 
 @media(max-width:760px){
