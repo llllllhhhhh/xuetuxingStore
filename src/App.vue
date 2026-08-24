@@ -689,8 +689,10 @@ const connectSupportSocket = (conversation, attempt = 0) => {
   closeSupportSocket()
   if (!conversation?.id || !getToken()) return
   const generation = supportSocketGeneration
-  const url = `${getMerchantWebSocketBaseUrl()}/support/ws/${conversation.id}?role=merchant&token=${encodeURIComponent(getToken())}`
-  const socket = new WebSocket(url)
+  const url = `${getMerchantWebSocketBaseUrl()}/support/ws/${conversation.id}?role=merchant`
+  // Token goes in a Sec-WebSocket-Protocol subprotocol so it never leaks
+  // into URLs, logs or browser history.
+  const socket = new WebSocket(url, [`bearer.${getToken()}`])
   supportSocket = socket
   socket.onopen = () => { supportConnected.value = true }
   socket.onclose = () => {
